@@ -1,6 +1,4 @@
 FROM python:3.12-alpine
-# 7zip unpacks the game ISOs
-RUN apk add --no-cache 7zip
 WORKDIR /app
 COPY prepare.py server.py ./
 COPY player/ ./player/

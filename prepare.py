@@ -10,7 +10,7 @@ Per game, into <data>/<slug>/:
 
 usage: prepare.py <data-dir> <iso-or-folder>...
 """
-import json, os, re, shutil, struct, subprocess, sys, tempfile, unicodedata
+import json, os, re, shutil, struct, sys, tempfile, unicodedata
 
 DIRECTOR_EXT = ('.dxr', '.cxt', '.cct', '.dir', '.cst', '.dcr')
 RENAMES = {'pathname': 'moviePath'}
@@ -137,10 +137,60 @@ def lowercase_tree(root):
 
 
 def extract_iso(iso, dest):
-    tool = next((t for t in ('7z', '7zz', '7za') if shutil.which(t)), None)
-    if not tool:
-        raise RuntimeError('7-Zip mangler (7z) - kan ikke pakke ISO ud')
-    subprocess.run([tool, 'x', '-y', f'-o{dest}', iso], check=True, stdout=subprocess.DEVNULL)
+    """Extract the ISO 9660 file system, using the Joliet tree for the long Danish names.
+    The discs are Mac/PC hybrids; 7-Zip picks the Apple side there and writes zero-filled
+    files, so the ISO 9660 directory records are read directly instead."""
+    SECTOR = 2048
+    with open(iso, 'rb') as f:
+        def read(lba, size):
+            f.seek(lba * SECTOR)
+            return f.read(size)
+
+        root, joliet, n = None, False, 16
+        while True:
+            vd = read(n, SECTOR)
+            if vd[1:6] != b'CD001' or vd[0] == 255:
+                break
+            if vd[0] == 1 and root is None:
+                root = vd[156:190]
+            elif vd[0] == 2 and vd[88:90] == b'%/' and vd[90:91] in (b'@', b'C', b'E'):
+                root, joliet = vd[156:190], True
+            n += 1
+        if root is None:
+            raise RuntimeError('ikke en ISO 9660-skive')
+
+        def walk(record, path):
+            lba, size = struct.unpack_from('<I', record, 2)[0], struct.unpack_from('<I', record, 10)[0]
+            data, p = read(lba, size), 0
+            while p < len(data):
+                ln = data[p]
+                if ln == 0:                          # records never cross a sector boundary
+                    p = (p // SECTOR + 1) * SECTOR
+                    continue
+                rec = data[p:p + ln]
+                p += ln
+                raw = rec[33:33 + rec[32]]
+                if raw in (b'\x00', b'\x01'):
+                    continue
+                name = raw.decode('utf-16-be' if joliet else 'latin-1').split(';')[0].rstrip('.')
+                target = os.path.join(path, name)
+                if rec[25] & 2:
+                    os.makedirs(target, exist_ok=True)
+                    walk(rec, target)
+                else:
+                    flba, fsize = struct.unpack_from('<I', rec, 2)[0], struct.unpack_from('<I', rec, 10)[0]
+                    with open(target, 'wb') as out:
+                        f.seek(flba * SECTOR)
+                        left = fsize
+                        while left:
+                            chunk = f.read(min(left, 1 << 20))
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            left -= len(chunk)
+
+        os.makedirs(dest, exist_ok=True)
+        walk(root, dest)
 
 
 def prepare(source, data_dir, log=print):

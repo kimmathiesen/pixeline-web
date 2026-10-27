@@ -7,7 +7,7 @@ the original CD happened to use:
   2. the same with .cct <-> .cxt swapped (DirPlayer asks for Shockwave .cct casts)
   3. a file with that name anywhere in the game (casts linked by bare file name)
 """
-import html, json, mimetypes, os, threading, urllib.parse
+import gzip, html, json, mimetypes, os, threading, urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import prepare
@@ -20,6 +20,7 @@ PORT = int(os.environ.get('PORT', '8080'))
 
 status = {'busy': False, 'log': []}
 by_name = {}          # slug -> {basename: relative path}, built lazily
+gzipped = {}          # player file path -> (mtime, gzip bytes)
 
 
 def log(msg):
@@ -99,19 +100,24 @@ background:#000;color:#ffd800;font-size:28px;font-weight:700;z-index:10;cursor:p
 #back{position:fixed;top:8px;left:8px;z-index:5;color:#666;font-size:14px;text-decoration:none}'''
 
 # The embed fills the screen; the (patched) player scales the stage to fit it. A tap is
-# required first: iOS only allows audio after a user gesture.
+# required first: iOS only allows audio after a user gesture. The 15 MB player loads with
+# defer, so the page shows "Indlæser…" until it is ready instead of ignoring taps.
 PLAYER_BODY = '''<a id="back" href="/">&#8592;</a><div id="stage"></div>
-<div id="start">Tryk for at starte</div>
+<div id="start">Indlæser …</div>
 <script>
-document.getElementById('start').addEventListener('click', function () {{
-  this.remove();
-  var e = document.createElement('embed');
-  e.setAttribute('src', '/games/{slug}/main.dxr');
-  e.setAttribute('type', 'application/x-director');
-  e.setAttribute('width', innerWidth);
-  e.setAttribute('height', innerHeight);
-  document.getElementById('stage').appendChild(e);
-  if (window.DirPlayer && DirPlayer.init) DirPlayer.init();
+var start = document.getElementById('start');
+document.addEventListener('DOMContentLoaded', function () {{
+  start.textContent = 'Tryk for at starte';
+  start.addEventListener('click', function () {{
+    start.remove();
+    var e = document.createElement('embed');
+    e.setAttribute('src', '/games/{slug}/main.dxr');
+    e.setAttribute('type', 'application/x-director');
+    e.setAttribute('width', innerWidth);
+    e.setAttribute('height', innerHeight);
+    document.getElementById('stage').appendChild(e);
+    DirPlayer.init();
+  }});
 }});
 </script>'''
 
@@ -121,21 +127,30 @@ class Handler(SimpleHTTPRequestHandler):
         if os.environ.get('DEBUG'):
             super().log_message(fmt, *args)
 
-    def send_body(self, body, ctype, code=200, cache='no-cache'):
+    def send_body(self, body, ctype, code=200, cache='no-cache', encoding=None):
         data = body.encode('utf-8') if isinstance(body, str) else body
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', cache)
+        if encoding:
+            self.send_header('Content-Encoding', encoding)
+            self.send_header('Vary', 'Accept-Encoding')
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(data)
 
-    def send_file(self, path, cache):
+    def send_file(self, path, cache, compress=False):
         ctype = {'.js': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json',
                  '.map': 'application/json'}.get(os.path.splitext(path)[1].lower())
-        self.send_body(open(path, 'rb').read(), ctype or mimetypes.guess_type(path)[0] or
-                       'application/octet-stream', cache=cache)
+        ctype = ctype or mimetypes.guess_type(path)[0] or 'application/octet-stream'
+        if compress and 'gzip' in self.headers.get('Accept-Encoding', ''):
+            # the player bundle halves in size; compress once and keep it in memory
+            mtime = os.path.getmtime(path)
+            if gzipped.get(path, (None,))[0] != mtime:
+                gzipped[path] = (mtime, gzip.compress(open(path, 'rb').read(), 6))
+            return self.send_body(gzipped[path][1], ctype, cache=cache, encoding='gzip')
+        self.send_body(open(path, 'rb').read(), ctype, cache=cache)
 
     def do_HEAD(self):
         self.do_GET()
@@ -154,13 +169,13 @@ class Handler(SimpleHTTPRequestHandler):
             if not g:
                 return self.send_body('Ukendt spil', 'text/plain; charset=utf-8', 404)
             return self.send_body(PAGE.format(title=html.escape(g['title']), style=PLAYER_STYLE,
-                head='<script src="/player/dirplayer-polyfill.js" data-manual-init></script>',
+                head='<script src="/player/dirplayer-polyfill.js" defer data-manual-init></script>',
                 body=PLAYER_BODY.format(slug=g['slug'])), 'text/html; charset=utf-8')
         if parts[0] == 'player' and len(parts) > 1:
             root = os.path.realpath(PLAYER_DIR)
             p = os.path.realpath(os.path.join(root, *parts[1:]))
             if p.startswith(root + os.sep) and os.path.isfile(p):
-                return self.send_file(p, 'public, max-age=86400')
+                return self.send_file(p, 'public, max-age=86400', compress=True)
         if parts[0] == 'games' and len(parts) > 2:
             p = resolve_game_file(parts[1], '/'.join(parts[2:]))
             if p:

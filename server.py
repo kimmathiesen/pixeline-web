@@ -4,7 +4,9 @@ background, then serves a game list, a player page per game and the game files.
 Game file lookup is forgiving, because the games ask for paths in whatever case and folder
 the original CD happened to use:
   1. the path lowercased (prepare.py lowercases every name)
-  2. the same with .cct <-> .cxt swapped (DirPlayer asks for Shockwave .cct casts)
+  2. the same with .cct <-> .cxt swapped (DirPlayer asks for Shockwave .cct casts), or with
+     .dxr/.dir/.dcr added to a bare movie name (`go to movie "BUSSEN\BUSSEN"`: DirPlayer adds
+     no extension when the host is an IP address, mistaking its dots for one)
   3. a file with that name anywhere in the game (casts linked by bare file name)
 """
 import gzip, html, json, mimetypes, os, threading, urllib.parse
@@ -60,6 +62,8 @@ def resolve_game_file(slug, rel):
     stem, ext = os.path.splitext(rel)
     if ext in ('.cct', '.cxt'):
         candidates.append(stem + ('.cxt' if ext == '.cct' else '.cct'))
+    elif not ext:
+        candidates += [rel + e for e in ('.dxr', '.dir', '.dcr')]
     for c in candidates:
         p = os.path.realpath(os.path.join(root, c))
         if p.startswith(root + os.sep) and os.path.isfile(p):

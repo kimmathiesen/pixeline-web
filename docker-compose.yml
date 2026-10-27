@@ -1,7 +1,7 @@
 services:
   pixeline:
     build: .
-    image: pixeline-web:latest
+    image: 192.168.68.58:3333/kim/pixeline-web:latest
     container_name: pixeline
     restart: unless-stopped
     ports:

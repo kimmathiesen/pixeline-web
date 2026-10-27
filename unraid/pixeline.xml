@@ -1,19 +1,19 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>pixeline</Name>
-  <Repository>__REGISTRY__/__OWNER__/pixeline-web:latest</Repository>
-  <Registry>__GITEA_URL__/__OWNER__/-/packages/container/pixeline-web/latest</Registry>
+  <Repository>192.168.68.58:3333/kim/pixeline-web:latest</Repository>
+  <Registry>http://192.168.68.58:3333/kim/-/packages/container/pixeline-web/latest</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>__GITEA_URL__/__OWNER__/pixeline-web</Support>
-  <Project>__GITEA_URL__/__OWNER__/pixeline-web</Project>
+  <Support>http://192.168.68.58:3333/kim/pixeline-web</Support>
+  <Project>http://192.168.68.58:3333/kim/pixeline-web</Project>
   <Overview>De gamle danske Pixeline-spil i browseren, også på iPad. Læg dine egne ISO-filer i ISO-mappen; containeren gør dem klar ved opstart. Bygger på en rettet udgave af DirPlayer (GPL-3).</Overview>
   <Category>GameServers: MediaServer:Other</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>__GITEA_URL__/__OWNER__/pixeline-web/raw/branch/main/unraid/pixeline.xml</TemplateURL>
-  <Icon>__GITEA_URL__/__OWNER__/pixeline-web/raw/branch/main/unraid/icon.png</Icon>
+  <TemplateURL>http://192.168.68.58:3333/kim/pixeline-web/raw/branch/main/unraid/pixeline.xml</TemplateURL>
+  <Icon>http://192.168.68.58:3333/kim/pixeline-web/raw/branch/main/unraid/icon.png</Icon>
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>

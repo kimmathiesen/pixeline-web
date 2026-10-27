@@ -88,3 +88,23 @@ index 78c053c..f49f7de 100644
      }
  
      pub fn set_loop_count(&mut self, count: i32) {
+diff --git a/vm-rust/src/player/score.rs b/vm-rust/src/player/score.rs
+index 0890a4e..3df1a65 100644
+--- a/vm-rust/src/player/score.rs
++++ b/vm-rust/src/player/score.rs
+@@ -3477,9 +3477,12 @@ impl Score {
+             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
+             channel.sprite.script_instance_list.clear();
+ 
+-            if channel.sprite.puppet {
+-                channel.sprite.reset();
+-            }
++            // Reset every sprite, not only puppets: this runs when a movie ends or is
++            // replaced, and a member Lingo stamped onto a sprite outlives `puppet = 0`.
++            // Pixeline's room un-puppets its idle-animation channels but leaves member
++            // 69 on them; carried into the next movie, member 69 is another cast's
++            // bitmap and covers that movie's own score sprites (Pixeline herself).
++            channel.sprite.reset();
+         }
+ 
+         self.invalidate_render_channel_cache();

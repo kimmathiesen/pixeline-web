@@ -13,10 +13,10 @@ klargjort og vist på listen, men de er ikke afprøvet endnu.
   til `main` (`.github/workflows/build.yml`).
 - Template: `https://raw.githubusercontent.com/kimmathiesen/pixeline-web/main/unraid/pixeline.xml`
 
-## Én gang på GitHub: gør imaget offentligt
+## Hvis Unraid ikke kan hente imaget
 
-Første build laver pakken `pixeline-web` under din GitHub-profil (fanen *Packages*). GitHub
-gør nye pakker private som standard. Så kan Unraid ikke hente dem uden login.
+Pakken `pixeline-web` er offentlig, fordi repoet er det. Hvis Unraid alligevel melder
+"unauthorized" eller "denied", så gør pakken offentlig manuelt:
 
 1. Gå til https://github.com/users/kimmathiesen/packages/container/package/pixeline-web
 2. **Package settings** → **Change visibility** → **Public**.

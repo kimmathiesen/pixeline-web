@@ -1,0 +1,90 @@
+diff --git a/src/views/Stage/index.tsx b/src/views/Stage/index.tsx
+index d426dc5..5752f2e 100644
+--- a/src/views/Stage/index.tsx
++++ b/src/views/Stage/index.tsx
+@@ -306,6 +306,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
+     if (!outerWidth || !outerHeight) return;
+     if (!userHasPannedRef.current) {
+       if (stageWidth && stageHeight) {
++        // Fit the stage to the container until the user zooms, so a movie fills a
++        // tablet screen instead of sitting at 1:1 in the middle of it.
++        const fit = Math.min(outerWidth / stageWidth, outerHeight / stageHeight);
++        if (fit > 0 && Math.abs(fit - scaleRef.current) > 0.001) {
++          scaleRef.current = fit;
++          effectiveScaleRef.current = getEffectiveScale(fit);
++          setScale(fit);
++        }
+         const es = getEffectiveScale(scaleRef.current);
+         setPan({
+           x: (outerWidth - stageWidth * es) / 2,
+diff --git a/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs b/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
+index 78c053c..f49f7de 100644
+--- a/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
++++ b/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
+@@ -2006,7 +2006,11 @@ impl SoundChannel {
+             // see the matching site further down.
+             let sound_member_for_cues = sound_member.clone();
+ 
+-            crate::player::spawn_player_local(async move {
++            // Start PCM synchronously: an AudioBufferSourceNode plays a buffer at any sample
++            // rate, so the async OfflineAudioContext resample is not needed. Deferring the
++            // start to a spawned task left the channel in Loading for as long as Lingo kept
++            // running, so busy-waits like `repeat while sound(1).isBusy()` never ended.
++            (move || {
+ 
+                 {
+                     let mut ch = self_rc_clone.borrow_mut();
+@@ -2014,18 +2018,7 @@ impl SoundChannel {
+                     *ch.is_decoding.borrow_mut() = true;
+                 }
+ 
+-                // Resample using OfflineAudioContext
+-                let resampled_buffer =
+-                    match Self::resample_audio_buffer(&source_buffer, target_sample_rate).await {
+-                        Ok(buf) => {
+-                            debug!("✅ Resampled to {} Hz", buf.sample_rate());
+-                            buf
+-                        }
+-                        Err(e) => {
+-                            warn!("⚠️ Resampling failed: {:?}, using original", e);
+-                            source_buffer
+-                        }
+-                    };
++                let resampled_buffer = source_buffer;
+ 
+                 // Check if decoding was cancelled
+                 {
+@@ -2167,8 +2160,7 @@ impl SoundChannel {
+                         audio_data.samples.len(),
+                         resampled_buffer.sample_rate()
+                     );
+-            });
+-            debug!("🚀 Spawned MP3 decode task (start_sound #2)");
++            })();
+         } else {
+             let mut this = self_rc.borrow_mut();
+             this.status = SoundStatus::Idle;
+@@ -3886,7 +3878,22 @@ impl SoundChannel {
+     }
+ 
+     pub fn is_busy(&self) -> bool {
+-        self.status != SoundStatus::Idle
++        if self.status == SoundStatus::Idle {
++            return false;
++        }
++        // status is only advanced by update() between frames, so a Lingo busy-wait like
++        // `repeat while sound(1).isBusy()` would spin forever. Check the AudioContext clock
++        // against the buffer duration, as soundBusy() does.
++        if self.status == SoundStatus::Playing && self.loop_count != 0 {
++            match self.source_node.as_ref().and_then(|s| s.buffer()) {
++                Some(buffer) => {
++                    return self.context_time() - self.playback_start_context_time <= buffer.duration();
++                }
++                None if self.source_node.is_none() => return false,
++                None => {}
++            }
++        }
++        true
+     }
+ 
+     pub fn set_loop_count(&mut self, count: i32) {

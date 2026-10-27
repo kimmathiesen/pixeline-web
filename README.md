@@ -45,7 +45,7 @@ Pakken `pixeline-web` er offentlig, fordi repoet er det. Hvis Unraid alligevel m
 
    | Felt | Standard |
    |---|---|
-   | WebUI | port `8080` |
+   | WebUI | port `8642` |
    | ISO-mappe | `/mnt/user/isos/pixeline` |
    | Spildata | `/mnt/user/appdata/pixeline` |
 
@@ -60,7 +60,7 @@ Når der er pushet til `main`, og GitHub Actions har bygget færdigt, viser Dock
 
 ## Spil på iPad
 
-1. Åbn `http://<unraid-ip>:8080` i Safari.
+1. Åbn `http://192.168.68.58:8642` i Safari.
 2. Tryk på dele-knappen og vælg **Føj til hjemmeskærm**. Så åbner spillet i fuld skærm som en app.
 3. Vend iPad'en på langs og tryk **Tryk for at starte**. Det tryk er nødvendigt, for ellers
    tillader iOS ikke lyd.

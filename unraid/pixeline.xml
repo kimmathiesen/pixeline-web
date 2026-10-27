@@ -20,7 +20,7 @@
   <DonateText/>
   <DonateLink/>
   <Requires>ISO-filer af Pixeline-spillene (dine egne).</Requires>
-  <Config Name="WebUI" Target="8080" Default="8080" Mode="tcp" Description="Port til spil-siden" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="WebUI" Target="8080" Default="8642" Mode="tcp" Description="Port til spil-siden" Type="Port" Display="always" Required="true" Mask="false">8642</Config>
   <Config Name="ISO-mappe" Target="/isos" Default="/mnt/user/isos/pixeline" Mode="ro" Description="Mappe med dine Pixeline ISO-filer (læses kun)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/isos/pixeline</Config>
   <Config Name="Spildata" Target="/data" Default="/mnt/user/appdata/pixeline" Mode="rw" Description="Her gemmes de klargjorte spil" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/pixeline</Config>
 </Container>

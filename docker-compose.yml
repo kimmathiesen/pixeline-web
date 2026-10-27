@@ -4,7 +4,7 @@ services:
     container_name: pixeline
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8642:8080"
     volumes:
       # dine Pixeline ISO-filer (læses kun)
       - /mnt/user/isos/pixeline:/isos:ro

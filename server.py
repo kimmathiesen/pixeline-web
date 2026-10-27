@@ -1,4 +1,4 @@
-"""Web server for the Pixeline games: prepares new discs from ISO_DIR into DATA_DIR in the
+r"""Web server for the Pixeline games: prepares new discs from ISO_DIR into DATA_DIR in the
 background, then serves a game list, a player page per game and the game files.
 
 Game file lookup is forgiving, because the games ask for paths in whatever case and folder
@@ -8,6 +8,9 @@ the original CD happened to use:
      .dxr/.dir/.dcr added to a bare movie name (`go to movie "BUSSEN\BUSSEN"`: DirPlayer adds
      no extension when the host is an IP address, mistaking its dots for one)
   3. a file with that name anywhere in the game (casts linked by bare file name)
+A linked cast arrives with ?castpath=<path it was authored at> (patched DirPlayer) and is
+looked for at the longest tail of that path first: games link same-named casts from different folders
+(Film:Menu3.cst and Speak:Menu3.cst), and DirPlayer asks for both next to the movie.
 """
 import gzip, html, json, mimetypes, os, threading, urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -55,15 +58,21 @@ def games():
     return sorted(out, key=lambda g: g['title'])
 
 
-def resolve_game_file(slug, rel):
+def resolve_game_file(slug, rel, castpath=None):
     root = os.path.realpath(os.path.join(DATA_DIR, slug))
     rel = rel.lower().replace('\\', '/')
     candidates = [rel]
-    stem, ext = os.path.splitext(rel)
-    if ext in ('.cct', '.cxt'):
-        candidates.append(stem + ('.cxt' if ext == '.cct' else '.cct'))
-    elif not ext:
-        candidates += [rel + e for e in ('.dxr', '.dir', '.dcr')]
+    if castpath:
+        # longest tail of the author's path that exists in the game wins
+        parts = [p for p in castpath.lower().split('/') if p][:-1]
+        name = os.path.basename(rel)
+        candidates = ['/'.join(parts[i:] + [name]) for i in range(len(parts))] + candidates
+    for c in list(candidates):
+        stem, ext = os.path.splitext(c)
+        if ext in ('.cct', '.cxt'):
+            candidates.append(stem + ('.cxt' if ext == '.cct' else '.cct'))
+        elif not ext:
+            candidates += [c + e for e in ('.dxr', '.dir', '.dcr')]
     for c in candidates:
         p = os.path.realpath(os.path.join(root, c))
         if p.startswith(root + os.sep) and os.path.isfile(p):
@@ -160,7 +169,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
-        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        url = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.unquote(url.path)
         parts = [p for p in path.split('/') if p]
         if not parts:
             return self.index()
@@ -181,7 +191,8 @@ class Handler(SimpleHTTPRequestHandler):
             if p.startswith(root + os.sep) and os.path.isfile(p):
                 return self.send_file(p, 'public, max-age=86400', compress=True)
         if parts[0] == 'games' and len(parts) > 2:
-            p = resolve_game_file(parts[1], '/'.join(parts[2:]))
+            castpath = urllib.parse.parse_qs(url.query).get("castpath", [None])[0]
+            p = resolve_game_file(parts[1], "/".join(parts[2:]), castpath)
             if p:
                 return self.send_file(p, 'public, max-age=3600')
         self.send_body('Ikke fundet', 'text/plain; charset=utf-8', 404)

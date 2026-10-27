@@ -1,8 +1,20 @@
 diff --git a/src/views/Stage/index.tsx b/src/views/Stage/index.tsx
-index d426dc5..5752f2e 100644
+index d426dc5..bad4e70 100644
 --- a/src/views/Stage/index.tsx
 +++ b/src/views/Stage/index.tsx
-@@ -306,6 +306,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
+@@ -69,7 +69,10 @@ function getEffectiveScale(scale: number): number {
+   const dpr = (typeof window !== "undefined" ? window.devicePixelRatio : null) ?? 1;
+   const physicalScale = scale * dpr;
+   if (physicalScale < 1) return scale;
+-  return Math.min(Math.round(physicalScale) / dpr, scale);
++  const snapped = Math.min(Math.round(physicalScale) / dpr, scale);
++  // Don't let crispness shrink a fitted stage noticeably (an 800x600 movie
++  // fitted 1.28x on a 1024x768 screen would otherwise drop back to 1x).
++  return snapped >= scale * 0.95 ? snapped : scale;
+ }
+ 
+ function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
+@@ -306,6 +309,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
      if (!outerWidth || !outerHeight) return;
      if (!userHasPannedRef.current) {
        if (stageWidth && stageHeight) {
@@ -17,8 +29,283 @@ index d426dc5..5752f2e 100644
          const es = getEffectiveScale(scaleRef.current);
          setPan({
            x: (outerWidth - stageWidth * es) / 2,
+diff --git a/vm-rust/src/director/chunks/media.rs b/vm-rust/src/director/chunks/media.rs
+index 6c5fccb..2b8749f 100644
+--- a/vm-rust/src/director/chunks/media.rs
++++ b/vm-rust/src/director/chunks/media.rs
+@@ -95,6 +95,42 @@ impl MediaChunk {
+             );
+         }
+ 
++        // A whole WAV file, as the Pixeline discs store their "Windows Media" sound
++        // members (IMA ADPCM, stereo). There is no Director sound header; decode it
++        // here to the raw big-endian 16-bit mono PCM the raw_pcm path plays.
++        if data_test.len() >= 12 && &data_test[0..4] == b"RIFF" && &data_test[8..12] == b"WAVE" {
++            match decode_wav(&data_test) {
++                Some((sample_rate, pcm)) => {
++                    debug!("MediaChunk: WAV decoded to {} samples @ {} Hz", pcm.len(), sample_rate);
++                    let mut audio_data = Vec::with_capacity(pcm.len() * 2);
++                    for s in pcm {
++                        audio_data.extend_from_slice(&s.to_be_bytes());
++                    }
++                    return Ok(MediaChunk {
++                        sample_rate,
++                        data_size_field: audio_data.len() as u32,
++                        guid: None,
++                        audio_data,
++                        is_compressed: false,
++                    });
++                }
++                None => debug!("MediaChunk: unsupported WAV format, parsing as-is"),
++            }
++        }
++
++        // A bare MP3 stream (frame sync first, no Director header): reading a
++        // header would eat the first frame and lose the sync.
++        if data_test.len() >= 4 && data_test[0] == 0xFF && (data_test[1] & 0xE0) == 0xE0 {
++            let sample_rate = Self::get_mp3_sample_rate(&data_test[0..4]).unwrap_or(0);
++            return Ok(MediaChunk {
++                sample_rate,
++                data_size_field: data_test.len() as u32,
++                guid: None,
++                audio_data: data_test,
++                is_compressed: true,
++            });
++        }
++
+         let original_endian = reader.endian;
+         reader.endian = Endian::Big;
+ 
+@@ -229,3 +265,95 @@ impl MediaChunk {
+         self.is_compressed || !self.audio_data.is_empty()
+     }
+ }
++
++/// Decode a RIFF/WAVE file (PCM 8/16-bit or IMA ADPCM) to mono 16-bit samples.
++fn decode_wav(b: &[u8]) -> Option<(u32, Vec<i16>)> {
++    let u16le = |o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
++    let u32le = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
++    let (mut fmt, mut data) = (None, None);
++    let mut p = 12;
++    while p + 8 <= b.len() {
++        let size = u32le(p + 4)? as usize;
++        let body = p + 8..(p + 8 + size).min(b.len());
++        match &b[p..p + 4] {
++            b"fmt " => fmt = Some(body),
++            b"data" => data = Some(body),
++            _ => {}
++        }
++        p += 8 + size + (size & 1);
++    }
++    let fmt = fmt?;
++    let data = &b[data?];
++    let f = fmt.start;
++    let (format, channels, rate) = (u16le(f)?, u16le(f + 2)? as usize, u32le(f + 4)?);
++    let (block_align, bits) = (u16le(f + 12)? as usize, u16le(f + 14)?);
++    if channels == 0 || !(3000..=768_000).contains(&rate) {
++        return None;
++    }
++    let mut frames: Vec<Vec<i32>> = Vec::new(); // per channel
++    match (format, bits) {
++        (1, 16) => {
++            for frame in data.chunks_exact(2 * channels) {
++                frames.push((0..channels).map(|c| i16::from_le_bytes([frame[2 * c], frame[2 * c + 1]]) as i32).collect());
++            }
++        }
++        (1, 8) => {
++            for frame in data.chunks_exact(channels) {
++                frames.push(frame.iter().map(|&s| ((s as i32) - 128) << 8).collect());
++            }
++        }
++        (0x11, 4) if block_align > 4 * channels => {
++            for block in data.chunks(block_align) {
++                if block.len() < 4 * channels {
++                    break;
++                }
++                let mut pred: Vec<i32> = (0..channels).map(|c| i16::from_le_bytes([block[4 * c], block[4 * c + 1]]) as i32).collect();
++                let mut idx: Vec<i32> = (0..channels).map(|c| (block[4 * c + 2] as i32).min(88)).collect();
++                frames.push(pred.clone());
++                // After the headers: 4-byte groups per channel, 8 samples each.
++                let body = &block[4 * channels..];
++                let mut group_frames: Vec<Vec<i32>> = Vec::new();
++                for (g, group) in body.chunks(4).enumerate() {
++                    let c = g % channels;
++                    if c == 0 {
++                        group_frames = vec![vec![0; channels]; 8];
++                    }
++                    for (i, byte) in group.iter().enumerate() {
++                        for (k, nib) in [byte & 0x0F, byte >> 4].into_iter().enumerate() {
++                            group_frames[i * 2 + k][c] = ima_step(&mut pred[c], &mut idx[c], nib);
++                        }
++                    }
++                    if c == channels - 1 {
++                        frames.extend(group_frames.drain(..));
++                    }
++                }
++            }
++        }
++        _ => return None,
++    }
++    let pcm = frames
++        .iter()
++        .map(|f| (f.iter().sum::<i32>() / f.len() as i32).clamp(-32768, 32767) as i16)
++        .collect();
++    Some((rate, pcm))
++}
++
++fn ima_step(pred: &mut i32, idx: &mut i32, nib: u8) -> i32 {
++    const STEPS: [i32; 89] = [
++        7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88,
++        97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658,
++        724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660,
++        4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818,
++        18500, 20350, 22385, 24623, 27086, 29794, 32767,
++    ];
++    const INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
++    let step = STEPS[*idx as usize];
++    let mut diff = step >> 3;
++    if nib & 1 != 0 { diff += step >> 2; }
++    if nib & 2 != 0 { diff += step >> 1; }
++    if nib & 4 != 0 { diff += step; }
++    if nib & 8 != 0 { *pred -= diff } else { *pred += diff }
++    *pred = (*pred).clamp(-32768, 32767);
++    *idx = (*idx + INDEX[(nib & 7) as usize]).clamp(0, 88);
++    *pred
++}
+diff --git a/vm-rust/src/io/encoding.rs b/vm-rust/src/io/encoding.rs
+index 2a861aa..1b016b4 100644
+--- a/vm-rust/src/io/encoding.rs
++++ b/vm-rust/src/io/encoding.rs
+@@ -196,3 +196,18 @@ pub fn decode_text_auto_macroman(bytes: &[u8]) -> String {
+         Err(_) => decode_macroman(bytes),
+     }
+ }
++
++/// Re-encode a string decoded with [`decode_win1252`] to its original bytes;
++/// `None` if it holds a character Windows-1252 cannot represent.
++pub fn encode_win1252(s: &str) -> Option<Vec<u8>> {
++    s.chars()
++        .map(|c| if (c as u32) < 0x80 { Some(c as u8) } else { (0x80..=0xFFu8).find(|&b| win1252_byte_to_char(b) == c) })
++        .collect()
++}
++
++/// Re-encode a string decoded with [`decode_macroman`] to its original bytes.
++pub fn encode_macroman(s: &str) -> Option<Vec<u8>> {
++    s.chars()
++        .map(|c| if (c as u32) < 0x80 { Some(c as u8) } else { (0x80..=0xFFu8).find(|&b| macroman_byte_to_char(b) == c) })
++        .collect()
++}
+diff --git a/vm-rust/src/player/bytecode/get_set.rs b/vm-rust/src/player/bytecode/get_set.rs
+index f811822..855d148 100644
+--- a/vm-rust/src/player/bytecode/get_set.rs
++++ b/vm-rust/src/player/bytecode/get_set.rs
+@@ -1249,6 +1249,17 @@ impl GetSetBytecodeHandler {
+                     player.movie.item_delimiter,
+                 )?;
+                 Ok(player.alloc_datum(Datum::Int(chunks.len() as i32)))
++            } else if prop_type == 0x04 {
++                // Sound channel properties (`the volume of sound 2`), mirroring kOpSet
++                let prop_name = get_sound_prop_name(prop_id as u16);
++                let channel_num_ref = {
++                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
++                    scope.stack.pop().unwrap()
++                };
++                let channel_num = player.get_datum(&channel_num_ref).int_value()?;
++                let sound_channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num as u16));
++                let result = SoundChannelDatumHandlers::get_prop(player, &sound_channel_datum, Symbol::builtin(prop_name))?;
++                Ok(player.alloc_datum(result))
+             } else {
+                 Err(ScriptError::new(format!(
+                     "OpCode.kOpGet call not implemented propertyID={} propertyType={}",
+diff --git a/vm-rust/src/player/cast_lib.rs b/vm-rust/src/player/cast_lib.rs
+index 5e6848d..cb34b05 100644
+--- a/vm-rust/src/player/cast_lib.rs
++++ b/vm-rust/src/player/cast_lib.rs
+@@ -240,9 +240,25 @@ impl CastLib {
+                 idx.get(name).copied()
+             }
+         };
++        if number.is_none() && !name.is_ascii() {
++            return self.find_member_by_name_bytes(name);
++        }
+         number.and_then(|n| self.members.get(&n))
+     }
+ 
++    /// Fallback for non-ASCII names: member names are decoded as Windows-1252
++    /// but Lingo string literals as Mac Roman, so a Mac-authored "PixGåBro" (byte
++    /// 0x8C) reads back as "PixGŒBro" from the cast and "PixGåBro" from the
++    /// script. Compare the original bytes instead.
++    fn find_member_by_name_bytes(&self, name: &str) -> Option<&CastMember> {
++        use crate::io::encoding::{encode_macroman, encode_win1252};
++        let wanted = encode_macroman(name)?.to_ascii_lowercase();
++        self.members
++            .values()
++            .filter(|m| encode_win1252(&m.name).map_or(false, |b| b.to_ascii_lowercase() == wanted))
++            .min_by_key(|m| m.number)
++    }
++
+ 
+     fn clear(&mut self) {
+         // Clear regardless of state. The previous early-return-when-not-Loaded
+diff --git a/vm-rust/src/player/cast_manager.rs b/vm-rust/src/player/cast_manager.rs
+index 6134695..918fbcf 100644
+--- a/vm-rust/src/player/cast_manager.rs
++++ b/vm-rust/src/player/cast_manager.rs
+@@ -1143,8 +1143,18 @@ fn normalize_cast_lib_path(base_path: &Option<Url>, file_path: &str) -> Option<S
+         format!("{}.cct", file_base_name)
+     };
+ 
++    // Casts are fetched from the movie's own folder, so two linked casts with the
++    // same name in different folders ("...:Film:Menu3.cst", "...:Speak:Menu3.cst")
++    // would collide. Pass the author's path along as a hint a server can match
++    // against its own folder tree to pick the right file.
+     let result = match base_path {
+-        Some(base_path) => base_path.join(&cast_file_name).unwrap().to_string(),
++        Some(base_path) => {
++            let mut url = base_path.join(&cast_file_name).unwrap();
++            if parts.len() >= 2 && url.query().is_none() {
++                url.query_pairs_mut().append_pair("castpath", &parts.join("/"));
++            }
++            url.to_string()
++        }
+         None => cast_file_name,
+     };
+ 
+diff --git a/vm-rust/src/player/handlers/datum_handlers/mod.rs b/vm-rust/src/player/handlers/datum_handlers/mod.rs
+index f0e7ac1..baa76fb 100644
+--- a/vm-rust/src/player/handlers/datum_handlers/mod.rs
++++ b/vm-rust/src/player/handlers/datum_handlers/mod.rs
+@@ -158,6 +158,11 @@ pub async fn player_call_datum_handler(
+                 let mut full_args = vec![obj_ref.clone()];
+                 full_args.extend(args.iter().cloned());
+                 Box::pin(crate::player::handlers::types::TypeHandlers::new(&full_args)).await
++            } else if reserve_player_ref(|player| match player.get_datum(obj_ref) {
++                crate::director::lingo::datum::Datum::Xtra(name) => crate::player::xtra::legacy::LegacyXtras::is_stub_xtra(name),
++                _ => false,
++            }) {
++                crate::player::xtra::legacy::LegacyXtras::call_stub_method(handler_name.as_str())
+             } else {
+                 Err(ScriptError::new_code(
+                     ScriptErrorCode::HandlerNotFound,
+diff --git a/vm-rust/src/player/handlers/datum_handlers/prop_list.rs b/vm-rust/src/player/handlers/datum_handlers/prop_list.rs
+index a8babfd..ca12e36 100644
+--- a/vm-rust/src/player/handlers/datum_handlers/prop_list.rs
++++ b/vm-rust/src/player/handlers/datum_handlers/prop_list.rs
+@@ -562,6 +562,12 @@ impl PropListDatumHandlers {
+                     // Silently ignore setters on prop lists
+                     return Ok(DatumRef::Void);
+                 }
++                // `ilk(aPropList, #propList)` dispatched as a method call
++                if handler_name.as_str().eq_ignore_ascii_case("ilk") {
++                    let mut full_args = vec![datum.clone()];
++                    full_args.extend(args.iter().cloned());
++                    return crate::player::handlers::types::TypeHandlers::ilk(&full_args);
++                }
+                 Err(ScriptError::new(format!(
+                     "No handler {handler_name} for prop list datum"
+                 )))
 diff --git a/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs b/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
-index 78c053c..f49f7de 100644
+index 78c053c..a3e028d 100644
 --- a/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
 +++ b/vm-rust/src/player/handlers/datum_handlers/sound_channel.rs
 @@ -2006,7 +2006,11 @@ impl SoundChannel {
@@ -64,7 +351,22 @@ index 78c053c..f49f7de 100644
          } else {
              let mut this = self_rc.borrow_mut();
              this.status = SoundStatus::Idle;
-@@ -3886,7 +3878,22 @@ impl SoundChannel {
+@@ -3209,9 +3201,14 @@ impl SoundChannel {
+         // --- STEP 4: Build valid RIFF/WAV ---
+         let bits = if (is_probably_8bit || is_probably_adpcm) && bits_per_sample != 16 {
+             16
++        } else if bits_per_sample == 0 {
++            // Unknown depth (e.g. a media member tagged mp3 whose stream didn't
++            // validate): assume 16-bit rather than divide by zero below.
++            16
+         } else {
+             bits_per_sample
+         };
++        let channels = channels.max(1);
+         let sample_count = (pcm_data.len() / (channels as usize * (bits as usize / 8))) as u32;
+         let byte_rate = sample_rate * channels as u32 * bits as u32 / 8;
+         let block_align = (channels * bits / 8) as u16;
+@@ -3886,7 +3883,22 @@ impl SoundChannel {
      }
  
      pub fn is_busy(&self) -> bool {
@@ -88,6 +390,92 @@ index 78c053c..f49f7de 100644
      }
  
      pub fn set_loop_count(&mut self, count: i32) {
+diff --git a/vm-rust/src/player/handlers/manager.rs b/vm-rust/src/player/handlers/manager.rs
+index c3b29ea..9c50bad 100644
+--- a/vm-rust/src/player/handlers/manager.rs
++++ b/vm-rust/src/player/handlers/manager.rs
+@@ -2487,6 +2487,15 @@ impl BuiltInHandlerManager {
+                     }
+                 })
+             }
++            // Old-style `erase member 100` / `erase(member 100)`: same as member.erase()
++            Some(BuiltInSymbol::Erase)
++                if !args.is_empty()
++                    && reserve_player_ref(|player| player.get_datum(&args[0]).type_enum() == DatumType::CastMemberRef) =>
++            {
++                crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
++                    &args[0], name, &args[1..].to_vec(),
++                )
++            }
+             Some(BuiltInSymbol::LocVToLinePos | BuiltInSymbol::LinePosToLocV | BuiltInSymbol::LocToCharPos | BuiltInSymbol::CharPosToLoc)
+                 if !args.is_empty() =>
+             {
+@@ -2507,6 +2516,12 @@ impl BuiltInHandlerManager {
+                             let remaining_args = args[1..].to_vec();
+                             return Some(call_xtra_instance_handler(&xtra_name, *instance_id, &name.to_string(), &remaining_args));
+                         }
++                        // `register(xtra "PrintOMatic", ...)`: a call on a stubbed legacy Xtra itself
++                        if let Datum::Xtra(xtra_name) = player.get_datum(&args[0]) {
++                            if crate::player::xtra::legacy::LegacyXtras::is_stub_xtra(xtra_name) {
++                                return Some(crate::player::xtra::legacy::LegacyXtras::call_stub_method(&name.to_string()));
++                            }
++                        }
+                         None
+                     }) {
+                         return res;
+diff --git a/vm-rust/src/player/mod.rs b/vm-rust/src/player/mod.rs
+index aba43e5..9876757 100644
+--- a/vm-rust/src/player/mod.rs
++++ b/vm-rust/src/player/mod.rs
+@@ -3553,6 +3553,12 @@ impl DirPlayer {
+     }
+ 
+     pub(crate) fn set_movie_prop(&mut self, prop: Symbol, value: Datum) -> Result<(), ScriptError> {
++        // `the searchPath(s)`: extra local folders Director looks in for linked
++        // files. Files are fetched by URL here, so accept and ignore the list
++        // (the Pixeline CDs point it at their "Updates" folder in startMovie).
++        if matches!(prop.to_string().to_ascii_lowercase().as_str(), "searchpath" | "searchpaths") {
++            return Ok(());
++        }
+         match prop.into_builtin() {
+             // LeechProtectionRemovalHelp `forceTheExitLock` — "force", not
+             // "set": the write is swallowed so a leech check that re-asserts
+@@ -4201,6 +4207,19 @@ pub async fn player_call_global_handler(
+     if xtra::manager::has_xtra_static_async_handler(handler_name.into()) {
+         return xtra::manager::call_xtra_static_async_handler(handler_name.into(), args).await;
+     }
++    // Function-call form of an async Xtra instance method, e.g. FileIO's
++    // `openFile(gFile, path, mode)` (the method form is routed in datum_handlers).
++    if let Some(first) = args.first() {
++        let instance = reserve_player_ref(|player| {
++            player.get_datum(first).to_xtra_instance().ok().map(|(name, id)| (name.to_owned(), *id))
++        });
++        if let Some((xtra_name, instance_id)) = instance {
++            let name: &str = handler_name.into();
++            if xtra::manager::has_xtra_instance_async_handler(&xtra_name, name, instance_id) {
++                return xtra::manager::call_xtra_instance_async_handler(&xtra_name, instance_id, name, &args[1..].to_vec()).await;
++            }
++        }
++    }
+     BuiltInHandlerManager::call_handler(handler_name, args)
+ }
+ 
+diff --git a/vm-rust/src/player/movie.rs b/vm-rust/src/player/movie.rs
+index c4a4ab7..baf1c71 100644
+--- a/vm-rust/src/player/movie.rs
++++ b/vm-rust/src/player/movie.rs
+@@ -215,6 +215,11 @@ impl Movie {
+                 let formatted = time.format("%m/%d/%Y").to_string();
+                 Ok(Datum::String(formatted))
+             },
++            // Danish Windows formats: the Pixeline discs split `the short date` on
++            // "-" and read day then month (Christmas speech on "24-12").
++            BuiltInSymbol::ShortDate => Ok(Datum::String(Local::now().format("%d-%m-%Y").to_string())),
++            BuiltInSymbol::AbbrDate => Ok(Datum::String(Local::now().format("%d. %b %Y").to_string())),
++            BuiltInSymbol::LongDate => Ok(Datum::String(Local::now().format("%A %d. %B %Y").to_string())),
+             BuiltInSymbol::LongTime => {
+                 let time = Local::now();
+                 let formatted = time.format("%H:%M:%S %p").to_string();
 diff --git a/vm-rust/src/player/score.rs b/vm-rust/src/player/score.rs
 index 0890a4e..3df1a65 100644
 --- a/vm-rust/src/player/score.rs
@@ -108,3 +496,147 @@ index 0890a4e..3df1a65 100644
          }
  
          self.invalidate_render_channel_cache();
+diff --git a/vm-rust/src/player/xtra/legacy.rs b/vm-rust/src/player/xtra/legacy.rs
+new file mode 100644
+index 0000000..9b06ad5
+--- /dev/null
++++ b/vm-rust/src/player/xtra/legacy.rs
+@@ -0,0 +1,78 @@
++//! Stand-ins for the Director 6/7-era Xtras and XLib calls that the Danish
++//! Pixeline CD-ROMs (1997-2003) load at startup.
++//!
++//! The games only need these to exist: `openXLib` and `DateMaster_register`
++//! run unconditionally in `startMovie`, a Lingo error there aborts the whole
++//! start sequence, and an unknown `xtra("X").new()` does the same. None of
++//! them has a browser equivalent worth emulating (printing, CD date stamps),
++//! so instances accept any call and answer 0 — except KeyPoll's
++//! `bgOneKey()`, which the arcade-style mini games poll for the arrow keys.
++
++use crate::{
++    director::lingo::datum::Datum,
++    player::{
++        handlers::manager::BuiltInHandlerManager, reserve_player_mut, DatumRef, ScriptError,
++    },
++};
++
++const STUB_XTRAS: [&str; 4] = ["datemaster", "keypoll", "printomatic", "pmatic"];
++
++pub struct LegacyXtras;
++
++impl LegacyXtras {
++    pub fn is_stub_xtra(name: &str) -> bool {
++        STUB_XTRAS.contains(&name.to_ascii_lowercase().as_str())
++    }
++
++    pub fn has_handler(name: &str) -> bool {
++        match_ci!(name, {
++            "openXLib" | "closeXLib" | "DateMaster_register" | "bgOneKey"
++                | "getNthFileNameInFolder" | "installMenu" => true,
++            _ => false,
++        })
++    }
++
++    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
++        match_ci!(name, {
++            "bgOneKey" => bg_one_key(args),
++            // An empty name ends the games' "Updates" folder scan.
++            "getNthFileNameInFolder" => alloc(Datum::String(String::new())),
++            _ => alloc(Datum::Void),
++        })
++    }
++
++    /// Any method on a stub instance, or on the Xtra itself
++    /// (`register(xtra "PrintOMatic", serial)`).
++    pub fn call_stub_method(handler_name: &str) -> Result<DatumRef, ScriptError> {
++        match_ci!(handler_name, {
++            "getVersion" => alloc(Datum::String("0".to_string())),
++            _ => alloc(Datum::Int(0)),
++        })
++    }
++}
++
++/// KeyPoll's `bgOneKey(code)`: the games pass Windows virtual-key codes on PC
++/// (`the platform` is "Windows,32" here). Translate the ones they use to the
++/// Mac key codes `keyPressed()` understands; letters are ASCII in both.
++fn bg_one_key(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
++    let code = match args.first() {
++        Some(arg) => reserve_player_mut(|player| player.get_datum(arg).int_value())?,
++        None => return alloc(Datum::Int(0)),
++    };
++    let mac_code = match code {
++        37 => 123, // left
++        38 => 126, // up
++        39 => 124, // right
++        40 => 125, // down
++        32 => 49,  // space
++        13 => 36,  // return
++        27 => 53,  // escape
++        c => c,
++    };
++    let arg = alloc(Datum::Int(mac_code))?;
++    BuiltInHandlerManager::key_pressed(&vec![arg])
++}
++
++fn alloc(datum: Datum) -> Result<DatumRef, ScriptError> {
++    reserve_player_mut(|player| Ok(player.alloc_datum(datum)))
++}
+diff --git a/vm-rust/src/player/xtra/manager.rs b/vm-rust/src/player/xtra/manager.rs
+index 2d562cb..ba28d63 100644
+--- a/vm-rust/src/player/xtra/manager.rs
++++ b/vm-rust/src/player/xtra/manager.rs
+@@ -8,6 +8,7 @@ use super::curl::{CurlXtra, CurlXtraManager};
+ use super::external;
+ use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
+ use super::leechprotection::LeechProtectionXtra;
++use super::legacy::LegacyXtras;
+ use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
+ use super::openurl::OpenUrlXtra;
+ use super::sysmenu::SysMenuXtra;
+@@ -27,7 +28,8 @@ pub fn is_xtra_registered(name: &str) -> bool {
+         || name_lower == "openurl"
+         || name_lower == "sysmenu"
+         || name_lower == "budapi"
+-        || name_lower == "leechprotectionremovalhelp";
++        || name_lower == "leechprotectionremovalhelp"
++        || LegacyXtras::is_stub_xtra(&name_lower);
+ }
+ 
+ pub fn get_registered_xtra_names() -> Vec<String> {
+@@ -70,6 +72,9 @@ pub fn try_call_xtra_static_handler(
+     if CurlXtra::has_static_handler(name) {
+         return Some(CurlXtra::call_static_handler(name, args));
+     }
++    if LegacyXtras::has_handler(name) {
++        return Some(LegacyXtras::call_handler(name, args));
++    }
+     // External plugins own bare global handlers too — e.g. the Groove plugin's
+     // `InitGroove()`/`MoveObject()`, which games call as bare globals (never
+     // `new(xtra "Groove")`). This is the sole path that serves Groove now that
+@@ -127,6 +132,7 @@ pub fn call_xtra_instance_handler(
+         "leechprotectionremovalhelp" if LeechProtectionXtra::has_handler(handler_name) => {
+             return LeechProtectionXtra::call_handler(handler_name, args)
+         }
++        name if LegacyXtras::is_stub_xtra(name) => LegacyXtras::call_stub_method(handler_name),
+         _ => Err(ScriptError::new(format!(
+             "No handler {} found for xtra {} instance #{}",
+             handler_name, xtra_name, instance_id
+@@ -220,6 +226,7 @@ pub fn create_xtra_instance(
+         // an opaque instance id for parity with the real Xtras, but the id
+         // is never consulted by any handler.
+         "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
++        name if LegacyXtras::is_stub_xtra(name) => Ok(0),
+         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
+     }
+ }
+diff --git a/vm-rust/src/player/xtra/mod.rs b/vm-rust/src/player/xtra/mod.rs
+index f52d2e9..fb58360 100644
+--- a/vm-rust/src/player/xtra/mod.rs
++++ b/vm-rust/src/player/xtra/mod.rs
+@@ -2,6 +2,7 @@ pub mod budapi;
+ pub mod curl;
+ pub mod external;
+ pub mod fileio;
++pub mod legacy;
+ pub mod leechprotection;
+ pub mod manager;
+ pub mod multiuser;

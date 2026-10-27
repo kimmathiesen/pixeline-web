@@ -4,7 +4,7 @@ player serves. The originals are only read, never changed.
 Per game, into <data>/<slug>/:
   * the disc's game folder (the one holding the Director projector), all names lowercased
     so URLs work on case-sensitive file systems
-  * main.dxr: the start movie extracted from the projector .exe
+  * main.dxr: the start movie extracted from the projector .exe (either byte order)
   * the Lingo name 'pathname' (which DirPlayer lacks) renamed to its synonym 'moviePath'
   * meta.json with the title
 
@@ -29,11 +29,15 @@ def title_of(path):
 # --- projector ---------------------------------------------------------------------------
 
 def find_embedded_movie(b):
-    """Offset of the little-endian start movie (XFIR....39VM) inside a projector, or -1."""
-    p = b.find(b'XFIR')
-    while p != -1 and b[p+8:p+12] != b'39VM':
-        p = b.find(b'XFIR', p + 4)
-    return p
+    """(offset, byte order) of the start movie inside a projector, or (-1, None). Windows-made
+    projectors embed it little-endian (XFIR....39VM); Mac-made ones big-endian (RIFX....MV93)."""
+    for tag, kind, order in ((b'XFIR', b'39VM', '<'), (b'RIFX', b'MV93', '>')):
+        p = b.find(tag)
+        while p != -1 and b[p+8:p+12] != kind:
+            p = b.find(tag, p + 4)
+        if p != -1:
+            return p, order
+    return -1, None
 
 
 def find_projector(root):
@@ -44,7 +48,7 @@ def find_projector(root):
                 continue
             path = os.path.join(d, f)
             b = open(path, 'rb').read()
-            if find_embedded_movie(b) != -1 and (best is None or len(b) > best[0]):
+            if find_embedded_movie(b)[0] != -1 and (best is None or len(b) > best[0]):
                 best = (len(b), path)
     return best and best[1]
 
@@ -53,19 +57,20 @@ def extract_main_movie(exe, out):
     """Write the projector's start movie as a standalone file, rebasing the absolute file
     offsets the embedded memory map uses."""
     b = open(exe, 'rb').read()
-    p = find_embedded_movie(b)
-    size = struct.unpack_from('<I', b, p + 4)[0] + 8
+    p, order = find_embedded_movie(b)
+    size = struct.unpack_from(order + 'I', b, p + 4)[0] + 8
     m = bytearray(b[p:p + size])
-    u32 = lambda o: struct.unpack_from('<I', m, o)[0]
+    u32 = lambda o: struct.unpack_from(order + 'I', m, o)[0]
+    tag = lambda t: t[::-1] if order == '<' else t      # FourCCs are stored byte-swapped in XFIR
     mmap = u32(24)
-    if m[mmap - p:mmap - p + 4] == b'pamm':
+    if m[mmap - p:mmap - p + 4] == tag(b'mmap'):
         off = mmap - p
-        struct.pack_into('<I', m, 24, off)
-        hdr, esz = struct.unpack_from('<HH', m, off + 8)
+        struct.pack_into(order + 'I', m, 24, off)
+        hdr, esz = struct.unpack_from(order + 'HH', m, off + 8)
         for i in range(u32(off + 16)):
             e = off + 8 + hdr + i * esz
-            if m[e:e+4] not in (b'eerf', b'kunj') and u32(e + 8) >= p:
-                struct.pack_into('<I', m, e + 8, u32(e + 8) - p)
+            if m[e:e+4] not in (tag(b'free'), tag(b'junk')) and u32(e + 8) >= p:
+                struct.pack_into(order + 'I', m, e + 8, u32(e + 8) - p)
     open(out, 'wb').write(m)
 
 

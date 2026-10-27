@@ -2,4 +2,5 @@
 docker-compose.yml
 .git
 .gitea
+.github
 unraid

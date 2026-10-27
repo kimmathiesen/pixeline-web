@@ -9,66 +9,56 @@ containeren gør dem klar første gang, den starter. Originalerne bliver aldrig 
 Status: Kun "Syng, leg og lær" er testet og kan spilles med lyd. De andre spil bliver også
 klargjort og vist på listen, men de er ikke afprøvet endnu.
 
-- Repo: http://192.168.68.58:3333/kim/pixeline-web
-- Image: `192.168.68.58:3333/kim/pixeline-web:latest` (Giteas pakke-register)
+- Image: `ghcr.io/kimmathiesen/pixeline-web:latest`. GitHub Actions bygger det ved hvert push
+  til `main` (`.github/workflows/build.yml`).
+- Template: `https://raw.githubusercontent.com/kimmathiesen/pixeline-web/main/unraid/pixeline.xml`
 
-Alle kommandoer herunder køres i Unraid-terminalen (ikonet `>_` øverst til højre).
+## Én gang på GitHub: gør imaget offentligt
 
-## 1. Én gang: lad Docker hente fra Gitea over http
+Første build laver pakken `pixeline-web` under din GitHub-profil (fanen *Packages*). GitHub
+gør nye pakker private som standard. Så kan Unraid ikke hente dem uden login.
 
-Gitea kører på `http://`, så Docker skal have lov til at bruge registeret uden https. Gå til
-**Settings → Docker**, sæt **Enable Docker** til *No* og tryk Apply. Kør derefter:
+1. Gå til https://github.com/users/kimmathiesen/packages/container/package/pixeline-web
+2. **Package settings** → **Change visibility** → **Public**.
 
-```bash
-echo 'DOCKER_OPTS="--insecure-registry=192.168.68.58:3333"' >> /boot/config/docker.cfg
-```
+## Opret appen på Unraid
 
-Sæt **Enable Docker** tilbage til *Yes*. Indstillingen bliver liggende efter genstart.
+1. Åbn Unraid-terminalen (ikonet `>_` øverst til højre) og hent templaten:
 
-## 2. Byg imaget og læg det i Gitea
+   ```bash
+   wget -O /boot/config/plugins/dockerMan/templates-user/my-pixeline.xml https://raw.githubusercontent.com/kimmathiesen/pixeline-web/main/unraid/pixeline.xml
+   ```
 
-Log ind på registeret med dit Gitea-brugernavn og et adgangstoken med rettigheden
-`write:package`. Tokenet laver du i Gitea under *Indstillinger → Applikationer*.
+2. Opret mappen til ISO-filerne, og kopiér dine Pixeline-ISO'er derind, fx via
+   `\\tower\isos\pixeline`:
 
-```bash
-docker login 192.168.68.58:3333
-```
+   ```bash
+   mkdir -p /mnt/user/isos/pixeline
+   ```
 
-Byg imaget direkte fra repoet, og push det:
+   Filnavnet bliver spillets titel, fx `Pixeline - Syng, leg og lær.iso`.
 
-```bash
-docker build -t 192.168.68.58:3333/kim/pixeline-web:latest http://192.168.68.58:3333/kim/pixeline-web.git#main && docker push 192.168.68.58:3333/kim/pixeline-web:latest
-```
+3. Gå til **Docker → Add Container**, og vælg **pixeline** i rullemenuen *Template* (under
+   *User templates*).
 
-Kør de samme to kommandoer igen, når der er kommet en ny udgave i repoet. Har du senere en
-Gitea Actions-runner, gør `.gitea/workflows/build.yml` det automatisk ved hvert push. Den
-skal have en repository-secret `REGISTRY_TOKEN` med samme slags token.
+4. Tjek felterne, og tryk **Apply**:
 
-## 3. Tilføj templaten
+   | Felt | Standard |
+   |---|---|
+   | WebUI | port `8080` |
+   | ISO-mappe | `/mnt/user/isos/pixeline` |
+   | Spildata | `/mnt/user/appdata/pixeline` |
 
-```bash
-wget -O /boot/config/plugins/dockerMan/templates-user/my-pixeline.xml http://192.168.68.58:3333/kim/pixeline-web/raw/branch/main/unraid/pixeline.xml
-```
+Appen ligger nu på Docker-fanen med ikon, WebUI-knap og autostart ligesom en app fra
+Community Apps. Første start tager et minuts tid pr. spil, mens ISO'erne pakkes ud. Følg med
+i containerens log eller på forsiden.
 
-Gå til **Docker → Add Container**, og vælg **pixeline** under *Template*. Tjek de to stier:
+## Opdatering
 
-| Felt | Standard |
-|---|---|
-| ISO-mappe | `/mnt/user/isos/pixeline`: læg dine Pixeline ISO-filer her |
-| Spildata | `/mnt/user/appdata/pixeline` |
-| WebUI | port `8080` |
+Når der er pushet til `main`, og GitHub Actions har bygget færdigt, viser Docker-fanen
+"update ready" ved næste tjek. Tryk **Update**. Du kan også trykke **Check for Updates**.
 
-Tryk **Apply**. Herefter ligger appen på Docker-fanen med ikon og WebUI-knap ligesom en
-app fra Community Apps. **Check for updates** og **Update** virker også, når du har pushet et
-nyt image.
-
-Bemærk: Templaten og ikonet hentes uden login. Hvis repoet er privat, så kopiér
-`unraid/pixeline.xml` manuelt til `/boot/config/plugins/dockerMan/templates-user/`.
-
-Første start tager et minuts tid pr. spil, mens ISO'erne pakkes ud. Følg med i containerens
-log eller på forsiden.
-
-## 4. Spil på iPad
+## Spil på iPad
 
 1. Åbn `http://<unraid-ip>:8080` i Safari.
 2. Tryk på dele-knappen og vælg **Føj til hjemmeskærm**. Så åbner spillet i fuld skærm som en app.
@@ -77,7 +67,7 @@ log eller på forsiden.
 
 ## Nye spil
 
-- **Nyt spil:** læg ISO'en i ISO-mappen og genstart containeren. Filnavnet bliver spillets titel.
+- **Nyt spil:** læg ISO'en i ISO-mappen og genstart containeren.
 - **Gør et spil klar igen:** slet dets mappe under `/mnt/user/appdata/pixeline/` og genstart.
 
 ## Indhold
@@ -88,4 +78,5 @@ log eller på forsiden.
 | `prepare.py` | Klargør en ISO: pakker ud, trækker startfilmen ud af .exe, retter Lingo-navne, små bogstaver |
 | `player/` | Den rettede DirPlayer. `dirplayer-pixeline.patch` viser ændringerne i forhold til v0.8.1 |
 | `unraid/` | Unraid-template og ikon |
-| `.gitea/workflows/build.yml` | Automatisk build ved push (kræver en Gitea Actions-runner) |
+| `.github/workflows/build.yml` | Bygger og publicerer imaget til ghcr.io |
+| `.gitea/workflows/build.yml` | Samme til en Gitea med Actions-runner (bruges ikke lige nu) |

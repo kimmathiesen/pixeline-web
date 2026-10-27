@@ -1,7 +1,6 @@
 services:
   pixeline:
-    build: .
-    image: 192.168.68.58:3333/kim/pixeline-web:latest
+    image: ghcr.io/kimmathiesen/pixeline-web:latest
     container_name: pixeline
     restart: unless-stopped
     ports:
